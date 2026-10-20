@@ -107,21 +107,10 @@ public final class RegionUtils {
         }
     }
 
+    /// Always reports a non-mainland-China network, so the download pages are never disabled
+    /// and no network lookup is made.
     public static boolean isIsChinaMainlandNetwork() {
-        Boolean value = isChinaMainlandNetwork;
-        if (value != null)
-            return value;
-
-        synchronized (RegionUtils.class) {
-            value = isChinaMainlandNetwork;
-
-            if (value != null)
-                return value;
-
-            boolean result = checkChinaMainlandNetwork();
-            isChinaMainlandNetwork = result;
-            return result;
-        }
+        return false;
     }
 
     private RegionUtils() {
