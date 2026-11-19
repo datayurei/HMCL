@@ -1,0 +1,107 @@
+name: Fork Release
+
+# Builds this fork and publishes a GitHub release whenever a version tag
+# matching an upstream HMCL release (e.g. v3.18.0.367, v3.17.2) is pushed.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. v3.18.0.367)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ github.repository_owner != 'HMCL-dev' }}
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Derive version from tag
+        shell: bash
+        run: |
+          # v3.18.0.367 -> VERSION_ROOT=3.18.0, BUILD_NUMBER=367 -> version 3.18.0.367
+          # v3.17.2     -> VERSION_ROOT=3.17,   BUILD_NUMBER=2   -> version 3.17.2
+          v="${TAG#v}"
+          if ! [[ "$v" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+            echo "Tag '$TAG' is not a numeric version tag" >&2
+            exit 1
+          fi
+          echo "VERSION_ROOT=${v%.*}" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=${v##*.}" >> "$GITHUB_ENV"
+          echo "HMCL_VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'liberica'
+          java-version: '17'
+          java-package: 'jdk+fx'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: true
+
+      - name: Build
+        shell: bash
+        run: xvfb-run --auto-servernum ./gradlew build -x test --no-daemon --parallel --stacktrace
+        env:
+          JAVA_TOOL_OPTIONS: -Djava.awt.headless=true
+          MICROSOFT_AUTH_ID: ${{ secrets.MICROSOFT_AUTH_ID }}
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+
+      - name: Collect artifacts and checksums
+        shell: bash
+        run: |
+          mkdir dist
+          for ext in exe jar sh deb; do
+            f="HMCL/build/libs/HMCL-$HMCL_VERSION.$ext"
+            if [ -f "$f" ]; then
+              cp "$f" dist/
+              (cd dist && sha256sum "HMCL-$HMCL_VERSION.$ext" | cut -d' ' -f1 | tr -d '\n' > "HMCL-$HMCL_VERSION.$ext.sha256")
+            fi
+          done
+          ls -l dist
+          [ -n "$(ls dist/*.jar 2>/dev/null)" ] || { echo "No JAR produced" >&2; exit 1; }
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          {
+            echo "Fork build of upstream [HMCL $TAG](https://github.com/HMCL-dev/HMCL/releases/tag/$TAG) with this fork's patches."
+            echo
+            echo "| File | SHA-256 Checksum |"
+            echo "| --- | --- |"
+            for s in dist/*.sha256; do
+              f="$(basename "${s%.sha256}")"
+              echo "| $f | \`$(cat "$s")\` |"
+            done
+          } > RELEASE_NOTE
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file RELEASE_NOTE
+          else
+            gh release create "$TAG" dist/* --title "HMCL-$HMCL_VERSION (fork)" --notes-file RELEASE_NOTE --verify-tag
+          fi
